@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Particle Nexus</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0f;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+      color: #fff;
+    }
+
+    canvas {
+      display: block;
+      position: fixed;
+      inset: 0;
+    }
+
+    #ui {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      background: linear-gradient(90deg, #00f5ff, #ff00ff, #00ff88);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      font-size: 0.65rem;
+      letter-spacing: 0.25em;
+      color: #ffffff44;
+      text-transform: uppercase;
+    }
+
+    #stats {
+      position: fixed;
+      bottom: 24px;
+      left: 24px;
+      z-index: 10;
+      display: flex;
+      gap: 24px;
+      pointer-events: none;
+    }
+
+    .stat {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .stat-val {
+      font-size: 1.4rem;
+      font-weight: bold;
+      background: linear-gradient(135deg, #00f5ff, #00ff88);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .stat-label {
+      font-size: 0.55rem;
+      letter-spacing: 0.2em;
+      color: #ffffff33;
+      text-transform: uppercase;
+    }
+
+    #controls {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    button {
+      background: transparent;
+      border: 1px solid #ffffff22;
+      color: #ffffff88;
+      padding: 8px 18px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.65rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s;
+      backdrop-filter: blur(4px);
+    }
+
+    button:hover {
+      border-color: #00f5ff88;
+      color: #00f5ff;
+      box-shadow: 0 0 12px #00f5ff22;
+    }
+
+    button.active {
+      border-color: #00f5ff;
+      color: #00f5ff;
+      box-shadow: 0 0 16px #00f5ff44;
+    }
+
+    .hint {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      font-size: 0.6rem;
+      letter-spacing: 0.15em;
+      color: #ffffff22;
+      text-align: right;
+      line-height: 1.8;
+      pointer-events: none;
+    }
+
+    #pulse {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 5;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <canvas id="pulse"></canvas>
+
+  <div id="ui">
+    <h1>Particle Nexus</h1>
+    <div class="subtitle">Interactive Particle Network</div>
+  </div>
+
+  <div class="hint">
+    move mouse · click to explode<br>
+    scroll to adjust gravity
+  </div>
+
+  <div id="stats">
+    <div class="stat">
+      <span class="stat-val" id="s-particles">0</span>
+      <span class="stat-label">Particles</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" id="s-connections">0</span>
+      <span class="stat-label">Connections</span>
+    </div>
+    <div class="stat">
+      <span class="stat-val" id="s-fps">0</span>
+      <span class="stat-label">FPS</span>
+    </div>
+  </div>
+
+  <div id="controls">
+    <button id="btn-mode">Mode: Repel</button>
+    <button id="btn-trail">Trails: On</button>
+    <button id="btn-color">Palette: Cyber</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const pulseCanvas = document.getElementById('pulse');
+    const pctx = pulseCanvas.getContext('2d');
+
+    let W, H;
+    function resize() {
+      W = canvas.width = pulseCanvas.width = window.innerWidth;
+      H = canvas.height = pulseCanvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', () => { resize(); init(); });
+
+    // --- Config ---
+    const PALETTES = {
+      cyber:  ['#00f5ff', '#ff00ff', '#00ff88', '#ff6b00', '#7b2fff'],
+      sunset: ['#ff6b6b', '#ffd93d', '#ff8e53', '#c9184a', '#ff4d6d'],
+      ocean:  ['#0077ff', '#00c8ff', '#00ffe0', '#0059ff', '#5c9eff'],
+      matrix: ['#00ff41', '#00cc33', '#009926', '#00ff88', '#66ff99'],
+    };
+    let paletteKeys = Object.keys(PALETTES);
+    let paletteIdx = 0;
+    let currentPalette = () => PALETTES[paletteKeys[paletteIdx]];
+
+    let MODE = 'repel';   // repel | attract
+    let TRAILS = true;
+    let gravity = 0;
+    let mouse = { x: W / 2, y: H / 2, down: false };
+    let pulses = [];
+
+    // --- Particles ---
+    const N = Math.min(120, Math.floor((W * H) / 10000));
+    let particles = [];
+
+    class Particle {
+      constructor() { this.reset(true); }
+      reset(rand = false) {
+        this.x = rand ? Math.random() * W : W / 2;
+        this.y = rand ? Math.random() * H : H / 2;
+        const speed = 0.4 + Math.random() * 1.2;
+        const angle = Math.random() * Math.PI * 2;
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.r = 1.5 + Math.random() * 2.5;
+        this.color = currentPalette()[Math.floor(Math.random() * currentPalette().length)];
+        this.life = 0;
+        this.maxLife = 400 + Math.random() * 400;
+      }
+      update() {
+        // Mouse influence
+        const dx = mouse.x - this.x;
+        const dy = mouse.y - this.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const force = Math.min(120 / (dist * dist), 0.6);
+        const dir = MODE === 'repel' ? -1 : 1;
+        if (dist < 180) {
+          this.vx += (dx / dist) * force * dir;
+          this.vy += (dy / dist) * force * dir;
+        }
+
+        // Gravity (scroll)
+        this.vy += gravity * 0.01;
+
+        // Damping
+        this.vx *= 0.985;
+        this.vy *= 0.985;
+
+        // Clamp speed
+        const spd = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+        if (spd > 4) { this.vx = (this.vx / spd) * 4; this.vy = (this.vy / spd) * 4; }
+
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // Bounce walls
+        if (this.x < 0) { this.x = 0; this.vx *= -0.7; }
+        if (this.x > W) { this.x = W; this.vx *= -0.7; }
+        if (this.y < 0) { this.y = 0; this.vy *= -0.7; }
+        if (this.y > H) { this.y = H; this.vy *= -0.7; }
+
+        this.life++;
+        if (this.life > this.maxLife) this.reset();
+      }
+      draw() {
+        const alpha = Math.min(this.life / 40, 1) * Math.min((this.maxLife - this.life) / 40, 1);
+        ctx.save();
+        ctx.globalAlpha = alpha * 0.9;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = this.color;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function init() {
+      particles = [];
+      for (let i = 0; i < N; i++) particles.push(new Particle());
+    }
+    init();
+
+    // --- Pulse rings ---
+    function addPulse(x, y) {
+      pulses.push({ x, y, r: 0, maxR: 200, alpha: 1 });
+      // Explode nearby particles
+      particles.forEach(p => {
+        const dx = p.x - x, dy = p.y - y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        if (dist < 180) {
+          const force = (180 - dist) / 180 * 8;
+          p.vx += (dx / dist) * force;
+          p.vy += (dy / dist) * force;
+        }
+      });
+    }
+
+    // --- Draw connections ---
+    let connectionCount = 0;
+    function drawConnections() {
+      connectionCount = 0;
+      const maxDist = 120;
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const a = particles[i], b = particles[j];
+          const dx = a.x - b.x, dy = a.y - b.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < maxDist) {
+            const alpha = (1 - dist / maxDist) * 0.35;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.strokeStyle = a.color;
+            ctx.lineWidth = (1 - dist / maxDist) * 1.2;
+            ctx.shadowBlur = 4;
+            ctx.shadowColor = a.color;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+            ctx.restore();
+            connectionCount++;
+          }
+        }
+      }
+    }
+
+    // --- Animation ---
+    let lastTime = performance.now();
+    let fps = 60;
+    let frameCount = 0;
+    let fpsTimer = 0;
+
+    function frame(now) {
+      requestAnimationFrame(frame);
+
+      const dt = now - lastTime;
+      lastTime = now;
+      frameCount++;
+      fpsTimer += dt;
+      if (fpsTimer > 500) {
+        fps = Math.round(frameCount / (fpsTimer / 1000));
+        frameCount = 0;
+        fpsTimer = 0;
+        document.getElementById('s-fps').textContent = fps;
+        document.getElementById('s-particles').textContent = particles.length;
+        document.getElementById('s-connections').textContent = connectionCount;
+      }
+
+      // Background fade (trails effect)
+      if (TRAILS) {
+        ctx.fillStyle = 'rgba(10,10,15,0.18)';
+      } else {
+        ctx.fillStyle = 'rgba(10,10,15,1)';
+      }
+      ctx.fillRect(0, 0, W, H);
+
+      drawConnections();
+      particles.forEach(p => { p.update(); p.draw(); });
+
+      // Pulse rings
+      pctx.clearRect(0, 0, W, H);
+      pulses = pulses.filter(p => p.alpha > 0.01);
+      pulses.forEach(p => {
+        p.r += 4;
+        p.alpha *= 0.93;
+        const pal = currentPalette();
+        pctx.save();
+        pctx.globalAlpha = p.alpha;
+        pctx.strokeStyle = pal[0];
+        pctx.lineWidth = 2;
+        pctx.shadowBlur = 20;
+        pctx.shadowColor = pal[0];
+        pctx.beginPath();
+        pctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        pctx.stroke();
+        // inner ring
+        if (p.r > 20) {
+          pctx.globalAlpha = p.alpha * 0.4;
+          pctx.strokeStyle = pal[2] || pal[0];
+          pctx.beginPath();
+          pctx.arc(p.x, p.y, p.r - 20, 0, Math.PI * 2);
+          pctx.stroke();
+        }
+        pctx.restore();
+      });
+    }
+    requestAnimationFrame(frame);
+
+    // --- Events ---
+    window.addEventListener('mousemove', e => {
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+    });
+
+    window.addEventListener('click', e => {
+      addPulse(e.clientX, e.clientY);
+    });
+
+    window.addEventListener('wheel', e => {
+      gravity = Math.max(-5, Math.min(5, gravity + (e.deltaY > 0 ? 0.5 : -0.5)));
+    });
+
+    // Touch support
+    window.addEventListener('touchmove', e => {
+      e.preventDefault();
+      mouse.x = e.touches[0].clientX;
+      mouse.y = e.touches[0].clientY;
+    }, { passive: false });
+
+    window.addEventListener('touchstart', e => {
+      addPulse(e.touches[0].clientX, e.touches[0].clientY);
+    });
+
+    // Buttons
+    document.getElementById('btn-mode').addEventListener('click', function () {
+      MODE = MODE === 'repel' ? 'attract' : 'repel';
+      this.textContent = `Mode: ${MODE === 'repel' ? 'Repel' : 'Attract'}`;
+      this.classList.toggle('active', MODE === 'attract');
+    });
+
+    document.getElementById('btn-trail').addEventListener('click', function () {
+      TRAILS = !TRAILS;
+      this.textContent = `Trails: ${TRAILS ? 'On' : 'Off'}`;
+      this.classList.toggle('active', !TRAILS);
+    });
+
+    document.getElementById('btn-color').addEventListener('click', function () {
+      paletteIdx = (paletteIdx + 1) % paletteKeys.length;
+      const name = paletteKeys[paletteIdx];
+      this.textContent = `Palette: ${name.charAt(0).toUpperCase() + name.slice(1)}`;
+      // Recolor particles
+      particles.forEach(p => {
+        p.color = currentPalette()[Math.floor(Math.random() * currentPalette().length)];
+      });
+    });
+  </script>
+</body>
+</html>
