@@ -34,9 +34,11 @@ One Node.js/Express app replaces the current nginx setup. It serves the static f
 | Route | External source | Auth |
 |---|---|---|
 | `GET /api/weather` | SMHI open data | None |
-| `GET /api/bus` | Trafiklab ResRobot v3 | `SL_API_KEY` env var |
+| `GET /api/bus` | Trafiklab ResRobot v2.1 | `SL_API_KEY` env var |
 | `GET /api/electricity` | elprisetjustnu.se | None |
 | `GET /api/news` | RSS: SVT, DN, Aftonbladet | None |
+
+All outbound fetch calls use a **8-second timeout**. If a call times out or errors, the API route returns `{ error: "source unavailable" }` with HTTP 200 (so the frontend handles it as a widget-level error, not a page-level failure).
 
 ### Portability
 
@@ -51,51 +53,125 @@ One Node.js/Express app replaces the current nginx setup. It serves the static f
 - **Mobile-first:** Single column on iPhone, 2-column grid on iPad (`768px` breakpoint).
 - **Dark theme** throughout — easy on the eyes at wake-up time.
 - **Header:** Current time (large) and date, updated every second via JS.
-- **Auto-refresh:** Full data refresh every 10 minutes via `setInterval`.
+- **Auto-refresh:** Full data refresh every 10 minutes via `setInterval`. On refresh failure, the widget retains its previous data and shows a small "last updated HH:MM" timestamp — it does not replace data with an error message mid-session.
 
 ### Widgets (top to bottom on mobile)
 
-1. **Rain warning banner** — full-width, amber/red, shown only when precipitation is forecast for today. Always at the top.
-2. **Weather** — current conditions icon/description, today's high/low, hourly precipitation summary for daytime hours.
-3. **Bus departures** — next 3–5 departures from Strömma Kanal → Slussen. Shows line, destination, minutes until departure. Departure highlighted red if <5 minutes away.
-4. **Electricity prices** — bar chart for 06:00–22:00, bars colored green→yellow→red by price level. Current hour highlighted. Powered by Chart.js.
-5. **News** — 5–8 headlines from Swedish sources (SVT, DN, Aftonbladet), each with source label and 1–2 sentence brief.
+1. **Rain warning banner** — full-width, amber/red. Shown when any hour between 06:00–22:00 today has `Wsymb2` value of 8–27 (light drizzle through heavy snow), or `pmean >= 0.5` mm/h. Always at the top when visible.
+2. **Weather** — current conditions (derived from current hour's `Wsymb2`), today's high/low (max and min `t` parameter across all forecast hours from 00:00–23:00 local time today in `Europe/Stockholm`), and a plain-text precipitation summary for daytime hours (06:00–22:00).
+3. **Bus departures** — next 3–5 departures from Strömma Kanal → Slussen. Shows line number, destination string, and minutes until departure. Any departure ≤5 minutes away is highlighted red.
+4. **Electricity prices** — bar chart (06:00–22:00), bars colored green (<0.50 SEK/kWh) → yellow (0.50–1.00) → red (>1.00). Current hour bar is outlined/highlighted. Powered by **Chart.js v4** (loaded from CDN: `https://cdn.jsdelivr.net/npm/chart.js@4`).
+5. **News** — 5–8 headlines from Swedish sources (SVT, DN, Aftonbladet), sorted by publication date descending. Each item shows source label, headline, and 1–2 sentence brief. **Deduplication:** articles whose headlines share 5 or more consecutive words are considered duplicates; only the earliest-published copy is kept.
 
 ### Loading states
 
-Each widget renders a skeleton/spinner independently while its `/api/*` call is in flight. Widgets render as data arrives — a slow news feed doesn't delay weather or bus data.
+Each widget renders a skeleton/spinner independently while its `/api/*` call is in flight. Widgets render as data arrives.
 
-### Error states
+### Error states (initial load only)
 
-Each widget shows an inline error message if its API call fails, without affecting the other widgets.
+If an API call fails on first load, the widget shows an inline `"Could not load [widget name]"` message. Other widgets are unaffected.
 
 ---
 
 ## Data Sources
 
 ### Weather — SMHI
-- Free, no API key required.
-- Use SMHI's open forecast API: `https://opendata-download-metfcst.smhi.se/api/category/pmp3g/version/2/geotype/point/lon/{lon}/lat/{lat}/data.json`
-- Coordinates for Strömma Kanal area (Stockholm): lat ~59.32, lon ~18.09 (to be confirmed).
-- Parse `pcat` (precipitation category) and `pmean` (precipitation mean) parameters to determine rain likelihood.
-- Parse `t` (temperature) for high/low, `Wsymb2` for weather symbol.
 
-### Bus — Trafiklab ResRobot
-- Requires `SL_API_KEY` (user has key).
-- ResRobot Departures v3: `https://api.resrobot.se/v2.1/departureBoard?key={key}&id={stopId}&maxJourneys=5&format=json`
-- Stop ID for "Strömma Kanal" to be looked up via ResRobot Stop Lookup API during implementation.
-- Filter results to show only departures toward Slussen.
+- Free, no API key.
+- Endpoint: `https://opendata-download-metfcst.smhi.se/api/category/pmp3g/version/2/geotype/point/lon/18.0965/lat/59.3260/data.json`
+  - Coordinates: lat **59.3260**, lon **18.0965** (Djurgårdskanalen / Strömma Kanal ferry stop area, Stockholm).
+- Key parameters in response (`timeSeries[].parameters[]`):
+  - `t` — air temperature (°C)
+  - `pmean` — mean precipitation (mm/h)
+  - `Wsymb2` — weather symbol (integer 1–27; 1=clear, 8–27 = precipitation of various types)
+- High/low: filter `timeSeries` to entries where the `validTime` falls on today's date in `Europe/Stockholm` (00:00–23:59). Take max and min `t` values.
+- Rain warning: check entries where `validTime` is between 06:00–22:00 local. Flag if any has `Wsymb2 >= 8` or `pmean >= 0.5`.
+- `precipSummary`: group consecutive rainy hours (where `Wsymb2 >= 8` or `pmean >= 0.5`) into time ranges, e.g. "Rain expected 10:00–14:00, 17:00–19:00". Show up to two ranges; if more, append "and later". Return empty string if no rain.
+
+**`/api/weather` response shape:**
+```json
+{
+  "symbol": 3,
+  "tempNow": 8.2,
+  "tempHigh": 12.1,
+  "tempLow": 4.3,
+  "rainWarning": true,
+  "precipSummary": "Rain expected 10:00–14:00"
+}
+```
+
+---
+
+### Bus — Trafiklab ResRobot v2.1
+
+- Requires `SL_API_KEY` env var.
+- **Stop ID lookup:** Call `GET https://api.resrobot.se/v2.1/location.name?input=Str%C3%B6mma+Kanal&key={key}&format=json` and use the `id` field from the first result (stop-level ID, not platform ID). Cache this ID in memory at server startup — do not re-fetch on every request.
+- **Departures:** `GET https://api.resrobot.se/v2.1/departureBoard?id={stopId}&maxJourneys=10&key={key}&format=json`
+- **Direction filter:** Keep only departures where the `direction` field (case-insensitive) contains `"slussen"` or destination stop name contains `"Slussen"`. If no results match after filtering, return all departures unfiltered (fail-open, since route data may vary).
+- Return the first 5 matching departures.
+
+**`/api/bus` response shape:**
+```json
+{
+  "departures": [
+    {
+      "line": "80",
+      "direction": "Slussen",
+      "scheduledTime": "07:42",
+      "minutesUntil": 4
+    }
+  ]
+}
+```
+
+---
 
 ### Electricity — elprisetjustnu.se
-- Free, no API key required.
-- `https://www.elprisetjustnu.se/api/v1/prices/{year}/{month}-{day}_SE4.json`
-- Returns hourly prices in SEK/kWh. Filter to 06:00–22:00 for display.
+
+- Free, no API key.
+- Construct today's date in **`Europe/Stockholm`** timezone to avoid midnight UTC/local mismatch.
+- Endpoint: `https://www.elprisetjustnu.se/api/v1/prices/{year}/{MM}-{DD}_SE4.json`
+- Response is an array of hourly objects with `SEK_per_kWh` and `time_start`.
+- Filter to hours 06:00–22:00 local time only.
+
+**`/api/electricity` response shape:**
+```json
+{
+  "hours": [
+    { "hour": 6, "price": 0.43 },
+    { "hour": 7, "price": 0.61 }
+  ],
+  "currentHour": 7
+}
+```
+
+---
 
 ### News — RSS feeds
-- SVT Nyheter: `https://www.svt.se/nyheter/rss.xml`
-- DN: `https://www.dn.se/rss/`
-- Aftonbladet: `https://rss.aftonbladet.se/rss2/small/pages/sections/senastenytt/`
-- Parse server-side with `rss-parser` npm package. Merge and sort by date, return top 8.
+
+- Sources:
+  - SVT Nyheter: `https://www.svt.se/nyheter/rss.xml`
+  - DN: `https://www.dn.se/rss/`
+  - Aftonbladet: `https://rss.aftonbladet.se/rss2/small/pages/sections/senastenytt/`
+- Parse with `rss-parser` npm package. Merge all items, sort by `pubDate` descending.
+- **Deduplication:** Sort all items by `pubDate` ascending before deduplication. Remove any item whose title shares 5+ consecutive words with an already-seen item — this keeps the item with the earliest `pubDate` (the original source) and discards later duplicates. After deduplication, re-sort descending for display.
+- Return top 8 after deduplication.
+- `brief` is populated from the RSS item's `contentSnippet` or `content` field, truncated to 200 characters.
+
+**`/api/news` response shape:**
+```json
+{
+  "articles": [
+    {
+      "title": "Headline here",
+      "brief": "Short description...",
+      "source": "SVT",
+      "url": "https://...",
+      "pubDate": "2026-03-19T06:30:00Z"
+    }
+  ]
+}
+```
 
 ---
 
@@ -109,11 +185,14 @@ COPY package*.json ./
 RUN npm ci --production
 COPY . .
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:3000/ || exit 1
 CMD ["node", "server.js"]
 ```
 
 ### docker-compose.yml
 ```yaml
+version: "3.8"
 services:
   morning-portal:
     build: .
@@ -124,7 +203,7 @@ services:
       - SL_API_KEY=${SL_API_KEY}
 ```
 
-A `.env` file (gitignored) holds `SL_API_KEY=<value>` for local development. On the Rock 5B, the env var is set directly in the compose file or via a `.env` file on the server.
+A `.env` file (gitignored) holds `SL_API_KEY=<value>` for local development. On the Rock 5B, the env var is set via a `.env` file on the server.
 
 ---
 
